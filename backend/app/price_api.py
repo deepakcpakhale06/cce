@@ -1,71 +1,58 @@
-from typing import Any
-import asyncio
-import httpx
+from aws_calc_mcp.core import create_estimate
 from .models import EstimateRow
-from .config import settings
-
-SERVICE_TO_CODE = {
-    'Amazon EC2': 'AmazonEC2',
-    'Amazon RDS': 'AmazonRDS',
-    'Amazon S3': 'AmazonS3',
-    'Amazon Lambda': 'AWSLambda',
-    'Amazon DynamoDB': 'AmazonDynamoDB',
-    'Amazon ElastiCache': 'AmazonElastiCache',
-}
 
 async def enrich_with_pricing(rows: list[EstimateRow], region: str) -> list[EstimateRow]:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        tasks = [fetch_row_price(client, row, region) for row in rows]
-        return await asyncio.gather(*tasks)
+    priced_rows: list[EstimateRow] = []
+    for row in rows:
+        priced_rows.append(await _compute_row_pricing(row, region))
+    return priced_rows
 
-async def fetch_row_price(client: httpx.AsyncClient, row: EstimateRow, region: str) -> EstimateRow:
+async def _compute_row_pricing(row: EstimateRow, region: str) -> EstimateRow:
     if not row.awsServiceName:
         return row
 
-    service_code = SERVICE_TO_CODE.get(row.awsServiceName)
-    if not service_code:
+    # Construct AWS Pricing Link instead of calling the estimator API
+    pricing_link_url = _generate_pricing_link(row, region)
+
+    # Set the link on the row object and clear cost fields
+    row.pricingLinkUrl = pricing_link_url
+    row.costPerMonth = None
+    row.yearlyCost = None
         return row
 
-    params = {
-        'ServiceCode': service_code,
-        'FormatVersion': 'aws_v1',
-        'RegionCode': region,
-        'MaxResults': 100,
-    }
+def _build_pricing_prompt(row: EstimateRow, region: str) -> str:
+    parts = []
+    if row.quantity and row.quantity != 1:
+        parts.append(str(row.quantity))
 
-    try:
-        response = await client.get(settings.aws_pricelist_api_url, params=params)
-        response.raise_for_status()
-        data = response.json()
-    except Exception:
-        return row
+    if row.configuration:
+        parts.append(str(row.configuration))
 
-    price = parse_price_from_response(data)
-    row.costPerMonth = round(price * row.quantity, 2)
-    row.yearlyCost = round(row.costPerMonth * 12, 2)
-    return row
+    if row.awsServiceName:
+        parts.append(str(row.awsServiceName))
 
+    if row.componentName and row.componentName not in row.awsServiceName and row.componentName not in row.configuration:
+        parts.append(str(row.componentName))
 
-def parse_price_from_response(data: Any) -> float:
-    if not isinstance(data, dict):
-        return 0.0
+    parts.append(f'in {region}')
+    return ' '.join(parts)
 
-    if 'PriceList' in data:
-        try:
-            price_list = data['PriceList']
-            if isinstance(price_list, list) and price_list:
-                first_item = price_list[0]
-                terms = first_item.get('terms', {})
-                for term_block in terms.values():
-                    if isinstance(term_block, dict):
-                        for term in term_block.values():
-                            price_dimensions = term.get('priceDimensions', {})
-                            if isinstance(price_dimensions, dict):
-                                for dim in price_dimensions.values():
-                                    price_per_unit = dim.get('pricePerUnit', {}).get('USD')
-                                    if price_per_unit:
-                                        return float(price_per_unit)
-        except Exception:
-            return 0.0
+def _generate_pricing_link(row: EstimateRow, region: str) -> str:
+    """
+    Generates a URL pointing to the AWS pricing page for the given service and configuration.
+    This is a placeholder implementation as the exact URL structure depends on AWS documentation.
+    """
 
-    return 0.0
+    # Basic URL construction - replace with actual AWS URL logic if available
+    service_name = row.awsServiceName.replace(" ", "-")
+    config_summary = str(row.configuration).replace(" ", "-") if row.configuration else ""
+
+    # Example pattern: https://aws.amazon.com/pricing/[SERVICE_NAME]/?region=[REGION]
+    base_url = f"https://aws.amazon.com/pricing/{service_name}/?region={region}"
+
+    if config_summary:
+        # Append configuration detail if possible, though this is highly speculative
+        return f"{base_url}#config={config_summary}"
+
+    return base_url
+

@@ -1,3 +1,5 @@
+import re
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
@@ -28,6 +30,7 @@ async def analyze(request: AnalyzeRequest):
             'local',
             None,
         )
+        rows = await enrich_with_pricing(rows, request.region)
         return Estimate(rows=rows)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -201,22 +204,76 @@ def _normalize_service_name(service_name: str) -> str:
 def _rows_to_services(rows: list[EstimateRow], region: str) -> list[dict]:
     services: list[dict] = []
     for row in rows:
-        service_name = row.awsServiceName.strip() if row.awsServiceName else row.componentName.strip()
-        if not service_name:
+        raw_service_name = row.awsServiceName.strip() if row.awsServiceName else row.componentName.strip()
+        if not raw_service_name:
             continue
 
-        config = _parse_config_string(row.configuration)
-        quantity_key = _quantity_key_for_service(service_name)
-        if row.quantity and quantity_key and quantity_key not in config:
-            config[quantity_key] = row.quantity
+        service_name = _normalize_service_name(raw_service_name)
+        config = _build_service_config(service_name, row)
 
         services.append({
-            'service': _normalize_service_name(service_name),
+            'service': service_name,
             'region': region,
             'description': row.componentName.strip() or None,
             'config': config,
         })
     return services
+
+
+def _build_service_config(service_name: str, row: EstimateRow) -> dict:
+    config = _parse_config_string(row.configuration)
+    if not isinstance(config, dict):
+        config = {}
+
+    raw = row.configuration or ''
+    lowered = raw.lower()
+
+    if service_name == 'EC2':
+        if 'instance_type' not in config:
+            match = re.search(r'\b(?:t[2345]\.\w+|m[2345]\.\w+|c[2345]\.\w+|r[34]\.\w+|db\.\w+)\b', lowered)
+            if match:
+                config['instance_type'] = match.group(0)
+        if 'storage_type' not in config and 'gp2' in lowered:
+            config['storage_type'] = 'gp2'
+        if 'storage_gb' not in config:
+            storage_match = re.search(r'(\d+)\s*gb', lowered)
+            if storage_match:
+                config['storage_gb'] = int(storage_match.group(1))
+    elif service_name == 'EBS':
+        if 'storage_type' not in config:
+            for t in ('gp3', 'gp2', 'io1', 'io2', 'st1', 'sc1'):
+                if t in lowered:
+                    config['storage_type'] = t
+                    break
+        if 'storage_gb' not in config:
+            storage_match = re.search(r'(\d+)\s*gb', lowered)
+            if storage_match:
+                config['storage_gb'] = int(storage_match.group(1))
+        if 'volumes' not in config and row.quantity:
+            config['volumes'] = row.quantity
+    elif service_name == 'S3':
+        if 'storage_gb' not in config:
+            storage_match = re.search(r'(\d+)\s*gb', lowered)
+            if storage_match:
+                config['storage_gb'] = int(storage_match.group(1))
+        if 'storage_class' not in config and 'glacier' in lowered:
+            config['storage_class'] = 'glacier'
+    elif service_name in {'RDS MySQL', 'RDS PostgreSQL', 'Aurora MySQL', 'Aurora PostgreSQL'}:
+        if 'instance_type' not in config:
+            match = re.search(r'\bdb\.\w+\b', lowered)
+            if match:
+                config['instance_type'] = match.group(0)
+        if 'nodes' not in config and row.quantity:
+            config['nodes'] = row.quantity
+    elif service_name == 'Lambda':
+        if 'requests' not in config and row.quantity:
+            config['requests'] = row.quantity
+
+    quantity_key = _quantity_key_for_service(service_name)
+    if row.quantity and quantity_key and quantity_key not in config:
+        config[quantity_key] = row.quantity
+
+    return config
 
 
 @app.post('/export')

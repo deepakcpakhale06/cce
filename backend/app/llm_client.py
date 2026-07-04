@@ -140,17 +140,24 @@ async def analyze_with_local(
     payload = {
         'model': model,
         'messages': [
-            {'role': 'system', 'content': 'You are an AWS cost estimation assistant.'},
+            {
+                'role': 'system',
+                'content': (
+                    'You are an AWS cost estimation assistant. Respond with only a JSON array and no additional '
+                    'text, explanation, or markdown. Do not change the exact component names, service names, or '
+                    'configuration details from the description.'
+                ),
+            },
             {'role': 'user', 'content': prompt},
         ],
-        'temperature': 0.2,
-        'max_tokens': 600,
+        'temperature': 0.0,
+        'max_tokens': 1200,
     }
     headers = {
         'Content-Type': 'application/json',
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         try:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
@@ -165,10 +172,20 @@ async def analyze_with_local(
     if isinstance(body, dict):
         choices = body.get('choices', [])
         if choices and isinstance(choices, list):
-            message = choices[0].get('message', {})
-            text = message.get('content', '')
+            first_choice = choices[0]
+            message = first_choice.get('message', {})
+            if isinstance(message, dict):
+                text = message.get('content', '') or message.get('reasoning_content', '')
+            if not text:
+                text = first_choice.get('text', '')
 
-    return parse_estimate_rows(text)
+    text = _strip_code_fence(text)
+    try:
+        return parse_estimate_rows(text)
+    except ValueError as exc:
+        raise RuntimeError(
+            f'Local model response parsing failed: {exc}. Response content: {text[:400]}',
+        ) from exc
 
 
 async def analyze_with_openai(
@@ -219,9 +236,10 @@ async def analyze_with_openai(
 
 def generate_prompt(description: str, region: str) -> str:
     return (
-        'You are an AWS cost estimation assistant. '
         'Based on this infrastructure description, return only a valid JSON array with up to 5 components. '
         'Each item must include componentName, awsServiceName, quantity, configuration, assumptions, costPerMonth, and yearlyCost. '
+        'Do not provide any explanation, analysis, or markdown formatting around the JSON. '
+        'Use the exact instance types and storage details from the description without changing them. '
         f'Description: "{description}" Region: {region}. '
         'If you cannot infer exact pricing, set costPerMonth and yearlyCost to 0.'
     )
@@ -259,23 +277,57 @@ def extract_gemini_text(body: Any) -> str:
     return ''
 
 
+def _extract_json_array(text: str) -> str | None:
+    start = text.find('[')
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for index, char in enumerate(text[start:], start=start):
+        if escape:
+            escape = False
+            continue
+        if char == '\\':
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == '[':
+            depth += 1
+        elif char == ']':
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return None
+
+
 def parse_estimate_rows(text: str) -> list[EstimateRow]:
+    payload = None
+    if not text or not text.strip():
+        raise ValueError('Local model returned an empty response body.')
+
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return [EstimateRow(
-            id='1',
-            componentName='Application server',
-            awsServiceName='Amazon EC2',
-            quantity=1,
-            configuration='t3.medium',
-            assumptions='Default fallback estimate',
-            costPerMonth=0,
-            yearlyCost=0,
-        )]
+        json_text = _extract_json_array(text)
+        if json_text:
+            try:
+                payload = json.loads(json_text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f'Failed to parse JSON array from model output: {exc}') from exc
 
-    rows = []
-    for index, item in enumerate(payload if isinstance(payload, list) else []):
+    if payload is None or not isinstance(payload, list):
+        raise ValueError('Local model output did not contain a valid JSON array of estimate rows.')
+
+    rows: list[EstimateRow] = []
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            continue
         rows.append(EstimateRow(
             id=str(item.get('id', index + 1)),
             componentName=item.get('componentName', ''),
@@ -287,3 +339,15 @@ def parse_estimate_rows(text: str) -> list[EstimateRow]:
             yearlyCost=float(item.get('yearlyCost', 0) or 0),
         ))
     return rows
+
+
+def _strip_code_fence(text: str) -> str:
+    if not text or not text.strip():
+        return text
+    trimmed = text.strip()
+    if trimmed.startswith('```') and trimmed.endswith('```'):
+        # Remove the outer code fence and any optional language hint.
+        lines = trimmed.splitlines()
+        if len(lines) >= 3:
+            return '\n'.join(lines[1:-1]).strip()
+    return trimmed

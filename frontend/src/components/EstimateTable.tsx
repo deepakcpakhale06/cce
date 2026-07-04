@@ -125,6 +125,45 @@ const awsServices = [
   },
 ]
 
+const serviceHints = [
+  { pattern: /\b(ec2|instance|virtual machine|vm|compute)\b/, service: 'EC2' },
+  { pattern: /\b(lambda|function|serverless)\b/, service: 'Lambda' },
+  { pattern: /\b(s3|bucket|object storage|storage)\b/, service: 'S3' },
+  { pattern: /\b(dynamo(db)?|no[- ]sql database)\b/, service: 'DynamoDB' },
+  { pattern: /\b(redis|elasticache|memcached|cache)\b/, service: 'ElastiCache' },
+  { pattern: /\b(rds|postgresql|postgres|mysql|database)\b/, service: 'RDS MySQL' },
+  { pattern: /\b(aurora)\b/, service: 'Aurora MySQL' },
+  { pattern: /\b(cloudfront|cdn)\b/, service: 'CloudFront' },
+  { pattern: /\b(api gateway|api gateway|rest api|http api)\b/, service: 'API Gateway' },
+  { pattern: /\b(alb|application load balancer|load balancer)\b/, service: 'ALB' },
+  { pattern: /\b(nlb|network load balancer)\b/, service: 'NLB' },
+  { pattern: /\b(nat gateway)\b/, service: 'NAT Gateway' },
+  { pattern: /\b(vpc|subnet|route table|internet gateway|vpn)\b/, service: 'VPC' },
+  { pattern: /\b(transit gateway|tgw)\b/, service: 'Transit Gateway' },
+  { pattern: /\b(data transfer|data in|data out|bandwidth)\b/, service: 'AWS Data Transfer' },
+  { pattern: /\b(sqs|queue)\b/, service: 'SQS' },
+  { pattern: /\b(sns|notification|topic)\b/, service: 'SNS' },
+  { pattern: /\b(ses|email service|email)\b/, service: 'SES' },
+  { pattern: /\b(cloudwatch|monitoring|logs|metrics|alarms)\b/, service: 'CloudWatch' },
+  { pattern: /\b(cloudtrail|audit|trail)\b/, service: 'CloudTrail' },
+  { pattern: /\b(guardduty|security monitoring|threat detection)\b/, service: 'GuardDuty' },
+]
+
+const inferAwsServiceName = (componentName: string): string => {
+  const normalized = componentName.trim().toLowerCase()
+  if (!normalized) {
+    return ''
+  }
+
+  for (const hint of serviceHints) {
+    if (hint.pattern.test(normalized)) {
+      return hint.service
+    }
+  }
+
+  return ''
+}
+
 const defaultConfigHelp = 'Enter service config values using the supported pricing calculator keys.'
 
 export default function EstimateTable({ rows, setRows }: EstimateTableProps) {
@@ -162,7 +201,14 @@ export default function EstimateTable({ rows, setRows }: EstimateTableProps) {
               <td>
                 <input
                   value={row.componentName}
-                  onChange={e => updateRow(row.id, { componentName: e.target.value })}
+                  onChange={e => {
+                    const componentName = e.target.value
+                    const inferredAwsServiceName = row.awsServiceName || inferAwsServiceName(componentName)
+                    updateRow(row.id, {
+                      componentName,
+                      awsServiceName: inferredAwsServiceName,
+                    })
+                  }}
                   placeholder="Component name"
                 />
               </td>
@@ -178,6 +224,9 @@ export default function EstimateTable({ rows, setRows }: EstimateTableProps) {
                     </option>
                   ))}
                 </select>
+                {row.awsServiceName && row.awsServiceName === inferAwsServiceName(row.componentName) ? (
+                  <div className="hint-text">Inferred service from component name.</div>
+                ) : null}
               </td>
               <td>
                 <input
