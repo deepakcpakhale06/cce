@@ -1,0 +1,45 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - 8000:8000
+    environment:
+      - BACKEND_HOST=0.0.0.0
+      - BACKEND_PORT=8000
+      - LLM_PROVIDER=${LLM_PROVIDER}
+      - LOCAL_LLM_URL=${LOCAL_LLM_URL}
+      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL}
+      - AWS_PRICELIST_API_URL=${AWS_PRICELIST_API_URL}
+      - DEFAULT_AWS_REGION=${DEFAULT_AWS_REGION}
+    volumes:
+      - ./backend:/app:cached
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - 5173:4173
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000
+    depends_on:
+      - backend
+
+  # Placeholder service for host-side Docker Model Runner integration.
+  # Docker Model Runner runs on the host, not inside this composition.
+  # Set LOCAL_LLM_URL=http://host.docker.internal:12434/engines/v1
+  # and enable the model runner on Docker Desktop.
+  model-runner-host:
+    image: alpine:3.18
+    command: ["sh", "-c", "echo 'Docker Model Runner is a host-side service. Enable it on Docker Desktop and point backend LOCAL_LLM_URL to host.docker.internal:12434/engines/v1.' && sleep infinity"]
+    labels:
+      - "com.cce.description=Placeholder for Docker Model Runner host integration"
+    environment:
+      - LOCAL_LLM_URL=${LOCAL_LLM_URL}
+      - LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL}
+    deploy:
+      restart_policy:
+        condition: none
